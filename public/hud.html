@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root { --hud-opacity: 0.70; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: transparent !important; overflow: hidden; user-select: none; }
+  body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
+  body.edit-mode {
+    -webkit-app-region: drag;
+    outline: 2px dashed rgba(255,204,0,0.5); outline-offset: -2px;
+  }
+
+  #hud {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; opacity: var(--hud-opacity); transition: opacity 0.5s;
+  }
+  #top-row { display: flex; align-items: baseline; justify-content: center; gap: 6px; margin-bottom: 6px; }
+  #gear { line-height: 1; text-shadow: 0 0 24px rgba(0,0,0,0.9); color: #fff; }
+  #gear.italic { font-style: italic; }
+  #gear.glow { background: linear-gradient(to top, rgba(255,255,255,0.12), transparent); padding: 1px 5px; }
+  #speed-wrap { display: flex; align-items: center; gap: 3px; }
+  #speed { font-family: 'Consolas', 'Cascadia Code', monospace; color: #fff; }
+  #speed.italic { font-style: italic; }
+  #labels { display: flex; flex-direction: column; color: #fff; opacity: 0.7; line-height: 1.15; }
+  #labels.italic { font-style: italic; }
+
+  #rpm-wrap { position: relative; width: 260px; height: 5px; background: rgba(255,255,255,0.10); margin-bottom: 6px; }
+  #rpm-bar { height: 100%; position: relative; }
+  #rpm-bar::after { content:""; position:absolute; right:0; top:0; width:1px; height:100%; background:#fff; box-shadow: 0 0 6px 2px rgba(255,255,255,0.7); }
+  #shift-line, #limiter-line { position: absolute; top: -2px; width: 2px; height: 9px; }
+  #shift-line { background: #3399ff; box-shadow: 0 0 6px 2px rgba(51,153,255,0.6); }
+  #limiter-line { background: #ff3333; box-shadow: 0 0 6px 2px rgba(255,51,51,0.6); }
+  #pwr-band { position: absolute; top: 2px; height: 1px; background: #fff; opacity: 0.6; }
+
+  #info-row { display: flex; gap: 12px; color: #fff; opacity: 0.7; }
+
+  .strobe { animation: flash 0.08s steps(2) infinite alternate; }
+  .bar-strobe { animation: bar-flash 0.08s steps(2) infinite alternate !important; }
+  @keyframes flash {
+    0%   { color: #3399ff; text-shadow: 0 0 30px #3399ff; }
+    100% { color: #fff; text-shadow: 0 0 60px #88ccff; }
+  }
+  @keyframes bar-flash {
+    0% { background: linear-gradient(to right,#3399ff44,#3399ff); box-shadow: 0 0 12px 3px rgba(51,153,255,0.7); }
+    100% { background: linear-gradient(to right,#ffffff88,#fff); box-shadow: 0 0 16px 5px rgba(200,220,255,0.8); }
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="top-row">
+    <div id="gear">N</div>
+    <div id="speed-wrap">
+      <div id="speed">000</div>
+      <div id="labels"><span>KM/H</span><span id="slip">SLIP</span></div>
+    </div>
+  </div>
+  <div id="rpm-wrap">
+    <div id="rpm-bar"></div>
+    <div id="pwr-band"></div>
+    <div id="shift-line"></div>
+    <div id="limiter-line"></div>
+  </div>
+  <div id="info-row">
+    <span id="rpm-text">0 rpm</span>
+    <span id="hp-text">0 hp</span>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+function gearLabel(g){return g===0?"R":String(g);}
+function rpmColor(pct,ys){
+  if(pct<ys*100)return"rgba(255,255,255,0.45)";
+  const z=(100-ys*100)/3;
+  if(pct<ys*100+z)return"#ffdd00";
+  if(pct<ys*100+2*z)return"#ff8800";
+  return"#ff3300";
+}
+
+function connect(){
+  const ws=new WebSocket("ws://127.0.0.1:9000");
+  ws.onmessage=e=>{
+    const d=JSON.parse(e.data);
+    if(d.type!=="telemetry")return;
+
+    const s=d.settings||{};
+    // Opacity
+    const editOn=document.body.classList.contains("edit-mode");
+    $("hud").style.opacity=(d.hud_visible||editOn)?(s.hud_opacity||0.70):"0";
+    // Scale
+    const scale=s.hud_scale||2.0;
+    // G-force float with EMA smoothing + per-axis sensitivity
+    const gAmp=s.g_float_amplitude||0;
+    let gx=0,gy=0;
+    if(gAmp>0){
+      const rawLat=(d.accel_lat||0), rawLon=(d.accel_lon||0);
+      const lat=Math.abs(rawLat)>0.15?rawLat:0;
+      const lon=Math.abs(rawLon)>0.2?rawLon:0;
+      const accelG=lon>0?lon:0, brakeG=lon<0?-lon:0;
+      const lonScale=lon>0?(s.g_float_accel_scale||0.5):(s.g_float_brake_scale||1.0);
+      const targetX=lat*(s.g_float_lat_scale||1.0)*gAmp;
+      const targetY=-lon*lonScale*gAmp;
+      const alpha=s.g_float_smoothing||0.08;
+      // Use window-level persistent smoothed values
+      if(!window._gSmooth){window._gSmooth={x:0,y:0};}
+      window._gSmooth.x+=((targetX||0)-window._gSmooth.x)*alpha;
+      window._gSmooth.y+=((targetY||0)-window._gSmooth.y)*alpha;
+      gx=window._gSmooth.x;gy=window._gSmooth.y;
+    }
+    $("hud").style.transform=`scale(${scale}) translate(${gx.toFixed(1)}px,${gy.toFixed(1)}px)`;
+    // Font settings
+    $("gear").style.fontSize=(s.gear_font_size||28)+"px";
+    $("gear").style.fontWeight=s.gear_font_weight||500;
+    $("gear").classList.toggle("italic",!!s.gear_italic);
+    $("gear").classList.toggle("glow",!!s.gear_glow);
+
+    $("speed").style.fontSize=(s.speed_font_size||42)+"px";
+    $("speed").style.fontWeight=s.speed_font_weight||500;
+    $("speed").classList.toggle("italic",!!s.speed_italic);
+
+    $("labels").style.fontSize=(s.label_font_size||12)+"px";
+    $("labels").classList.toggle("italic",!!s.label_italic);
+    $("top-row").style.gap=(s.top_row_gap||4)+"px";
+    $("speed-wrap").style.gap=(s.speed_label_gap||3)+"px";
+
+    // Data
+    const rpm=d.rpm||0,rpmMax=d.rpm_max||8000,rpmIdle=d.rpm_idle||1500;
+    const range=rpmMax-rpmIdle||1;
+    const rpmPct=Math.max(0,Math.min(100,(rpm-rpmIdle)/range*100));
+    const ys=s.gear_yellow_start||0.5;
+    const sa=d.shift_advice||{};
+
+    $("gear").textContent=gearLabel(d.gear);
+    $("speed").textContent=String(Math.round(d.speed_kmh||0)).padStart(3,"0");
+    // RPM bar width
+    $("rpm-wrap").style.width=(s.rpm_bar_width||260)+"px";
+    $("rpm-text").textContent=Math.round(rpm)+" rpm";
+    $("hp-text").textContent=Math.round((d.power_kw||0)*1.341)+" hp";
+
+    // RPM bar
+    $("rpm-bar").style.width=rpmPct+"%";
+    if(!sa.limiter){const c=rpmColor(rpmPct,ys);$("rpm-bar").style.background=`linear-gradient(to right,${c}44,${c})`;}
+
+    // Shift/limiter lines with display-layer EMA anti-flicker
+    if(!window._ms){window._ms={sr:0,lr:100,pl:33,pw:30};}
+    const ma=s.marker_ema_alpha||0.06;
+    const sr=sa.ready?sa.shift_rpm:0;
+    const srPct=sr>0?Math.max(0,Math.min(100,(sr-rpmIdle)/range*100)):0;
+    window._ms.sr+=srPct>0?(srPct-window._ms.sr)*ma:0;
+    $("shift-line").style.left=window._ms.sr+"%";
+
+    const lr=sa.fuel_cut_rpm||sa.limiter_rpm||rpmMax;
+    const lrPct=Math.min((lr-rpmIdle)/range*100,100);
+    window._ms.lr+=lrPct>0?(lrPct-window._ms.lr)*ma:0;
+    $("limiter-line").style.left=window._ms.lr+"%";
+
+    // Power band with display-layer EMA
+    if(d.power_band&&d.power_band.lo>0){
+      const pb=d.power_band;
+      const plPct=(pb.lo-rpmIdle)/range*100;
+      const pwPct=(pb.hi-pb.lo)/range*100;
+      window._ms.pl=Math.max(0,Math.min(100,window._ms.pl+(plPct>0?(plPct-window._ms.pl)*ma:0)));
+      window._ms.pw=Math.max(0,Math.min(100,window._ms.pw+(pwPct>0?(pwPct-window._ms.pw)*ma:0)));
+      $("pwr-band").style.left=window._ms.pl+"%";
+      $("pwr-band").style.width=window._ms.pw+"%";
+      $("pwr-band").style.display="";
+    }else{
+      // Demo: 33-63%
+      window._ms.pl=Math.max(0,Math.min(100,window._ms.pl+(33-window._ms.pl)*ma));
+      window._ms.pw=Math.max(0,Math.min(100,window._ms.pw+(30-window._ms.pw)*ma));
+      $("pwr-band").style.left=window._ms.pl+"%";
+      $("pwr-band").style.width=window._ms.pw+"%";
+      $("pwr-band").style.display="";
+    }
+
+    // Strobe
+    const ur=sa.urgency;
+    if(ur==="shift"||ur==="over"){
+      $("gear").classList.add("strobe");$("gear").style.color="";
+      $("rpm-bar").classList.add("bar-strobe");
+    }else{
+      $("gear").classList.remove("strobe");
+      $("gear").style.color=ur==="near"?"#d2991d":ur==="over"?"#f85149":"#fff";
+      $("rpm-bar").classList.remove("bar-strobe");
+    }
+
+    // SLIP
+    const ms=d.max_slip||0;
+    $("slip").style.color=ms>(s.slip_danger||0.5)?"#ff3333":ms>(s.slip_warn||0.1)?"#ffcc00":"";
+
+    // EV
+    if(d.is_ev){
+      $("shift-line").style.display="none";$("limiter-line").style.display="none";
+      $("pwr-band").style.display="none";$("rpm-bar").style.background="linear-gradient(to right,#3399ff44,#3399ff)";
+      $("gear").classList.remove("strobe");$("rpm-bar").classList.remove("bar-strobe");
+    }else{
+      $("shift-line").style.display="";$("limiter-line").style.display="";
+    }
+  };
+  ws.onclose=()=>setTimeout(connect,3000);
+}
+connect();
+</script>
+</body>
+</html>
