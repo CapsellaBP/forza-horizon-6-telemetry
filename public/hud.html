@@ -148,7 +148,7 @@ function connect(){
     const ma=s.marker_ema_alpha||0.06;
     const sr=sa.ready?sa.shift_rpm:0;
     const srPct=sr>0?Math.max(0,Math.min(100,(sr-rpmIdle)/range*100)):0;
-    window._ms.sr+=srPct>0?(srPct-window._ms.sr)*ma:0;
+    window._ms.sr+=(srPct-window._ms.sr)*ma;
     $("shift-line").style.left=window._ms.sr+"%";
 
     const lr=sa.fuel_cut_rpm||sa.limiter_rpm||rpmMax;
@@ -157,10 +157,12 @@ function connect(){
     $("limiter-line").style.left=window._ms.lr+"%";
 
     // Power band with display-layer EMA
-    if(d.power_band&&d.power_band.lo>0){
+    if(d.shift_advice&&d.shift_advice.ready&&d.shift_advice.shift_rpm>rpmIdle){
       const pb=d.power_band;
-      const plPct=(pb.lo-rpmIdle)/range*100;
-      const pwPct=(pb.hi-pb.lo)/range*100;
+      const rawLeft=Math.max(0,(pb.lo-rpmIdle)/range*100);
+      const rawW=Math.max(0,(pb.hi-pb.lo)/range*100);
+      const plPct=Math.min(rawLeft,100);
+      const pwPct=Math.min(rawW,100-plPct);
       window._ms.pl=Math.max(0,Math.min(100,window._ms.pl+(plPct>0?(plPct-window._ms.pl)*ma:0)));
       window._ms.pw=Math.max(0,Math.min(100,window._ms.pw+(pwPct>0?(pwPct-window._ms.pw)*ma:0)));
       $("pwr-band").style.left=window._ms.pl+"%";

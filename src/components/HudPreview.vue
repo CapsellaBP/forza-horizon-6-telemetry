@@ -68,13 +68,18 @@ const limiterPct = computed(() => {
   if (fuelCutRpm.value > 0) return Math.max(0, Math.min(100, (fuelCutRpm.value - rpmIdle.value) / rpmRange.value * 100))
   return 100
 })
-const pbLo = computed(() => {
-  const pb = props.telemetry?.power_band
-  return pb?.lo || (rpmIdle.value + rpmRange.value * 0.33)
-})
-const pbHi = computed(() => {
-  const pb = props.telemetry?.power_band
-  return pb?.hi || (rpmIdle.value + rpmRange.value * 0.63)
+const pbLoPct = computed(() => {
+  const a = props.telemetry?.shift_advice
+  if (a?.ready && a?.shift_rpm > rpmIdle.value) {
+    const pb = props.telemetry?.power_band
+    const lo = pb?.lo ?? (rpmIdle.value + rpmRange.value * 0.33)
+    const hi = pb?.hi ?? (rpmIdle.value + rpmRange.value * 0.63)
+    const left = Math.max(0, (lo - rpmIdle.value) / rpmRange.value * 100)
+    const width = Math.min(100 - left, Math.max(0, (hi - lo) / rpmRange.value * 100))
+    return { left: left.toFixed(1), width: width.toFixed(1) }
+  }
+  // Default fallback when curve not ready
+  return { left: '33', width: '30' }
 })
 
 const editMode = computed(() => !!settings.value.hud_edit_mode)
@@ -120,7 +125,7 @@ const slipColor = computed(() => {
       <div class="hud-shift-line" :style="{ left: shiftLinePct + '%' }"></div>
       <div class="hud-limiter-line" :style="{ left: limiterPct + '%' }"></div>
       <div class="hud-power-band"
-        :style="{ left: ((pbLo - rpmIdle) / rpmRange * 100) + '%', width: ((pbHi - pbLo) / rpmRange * 100) + '%' }">
+        :style="{ left: pbLoPct.left + '%', width: pbLoPct.width + '%' }">
       </div>
     </div>
 
@@ -128,6 +133,9 @@ const slipColor = computed(() => {
       <span>{{ rpm.toFixed(0) }} rpm</span>
       <span>{{ (powerKw * 1.341).toFixed(0) }} hp</span>
       <span v-if="boostPsi > 0.1">{{ boostPsi.toFixed(1) }} psi</span>
+    </div>
+    <div class="hud-debug-row">
+      PB:{{ pbLoPct.left }}+{{ pbLoPct.width }} rdy={{ props.telemetry?.shift_advice?.ready ? 1 : 0 }} sr={{ props.telemetry?.shift_advice?.shift_rpm }} sl={{ shiftLinePct }} lm={{ limiterPct }}
     </div>
   </div>
 </template>
@@ -190,5 +198,8 @@ const slipColor = computed(() => {
 }
 .hud-info-row {
   display: flex; gap: 12px; font-size: 12px; opacity: 0.7; justify-content: center;
+}
+.hud-debug-row {
+  font-size: 9px; opacity: 0.35; text-align: center; margin-top: 2px;
 }
 </style>

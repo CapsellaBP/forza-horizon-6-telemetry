@@ -66,7 +66,7 @@ impl Default for State {
                 "marker_ema_alpha": 0.06,
                 "g_total_ema_alpha": 0.05,
                 "rpm_bar_width": 260,
-                "boost_stable_sample": false,
+                "boost_stable_sample": false, "boost_stable_frames": 30, "boost_stable_tol": 0.90,
                 "udp_port": 5300,
 
 
@@ -112,7 +112,8 @@ fn build_broadcast(state: &State, _connected: usize, edit_mode: bool, rec_on: bo
     // Shift advisor data
     let mut a = adv.advisor.lock().unwrap();
     let advice = a.advice(rpm, rpm_max, throttle, gear);
-    let curve = a.get_curve(0.93);
+    let band_pct = state.settings.get("power_band_pct").and_then(|v| v.as_f64()).unwrap_or(0.93);
+    let curve = a.get_curve(band_pct);
     let is_ev = *adv.is_ev.lock().unwrap();
 
     BroadcastMsg {
@@ -275,7 +276,10 @@ async fn run(
                             (s.settings.get("sample_throttle_min").and_then(|v| v.as_f64()).unwrap_or(0.95),
                              s.settings.get("curve_alpha").and_then(|v| v.as_f64()).unwrap_or(0.25),
                              s.settings.get("sample_skip_frames").and_then(|v| v.as_u64()).unwrap_or(8) as u32,
-                             s.settings.get("power_drop_limit").and_then(|v| v.as_f64()).unwrap_or(0.0))
+                             s.settings.get("power_drop_limit").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                             s.settings.get("boost_stable_sample").and_then(|v| v.as_bool()).unwrap_or(false),
+                             s.settings.get("boost_stable_frames").and_then(|v| v.as_u64()).unwrap_or(30) as u32,
+                             s.settings.get("boost_stable_tol").and_then(|v| v.as_f64()).unwrap_or(0.90))
                         };
                         {
                             let mut last_id = udp_adv.last_car_id.lock().unwrap();
@@ -287,6 +291,9 @@ async fn run(
                                         *a = ShiftAdvisor::from_dict(saved);
                                         a.throttle_min = cur_settings.0; a.alpha = cur_settings.1;
                                         a.skip_frames = cur_settings.2; a.power_drop_limit = cur_settings.3;
+                                        a.boost_stable_sample = cur_settings.4;
+                                        a.boost_stable_frames = cur_settings.5;
+                                        a.boost_stable_tol = cur_settings.6;
                                     }
                                     drop(a);
                                 }
@@ -311,6 +318,9 @@ async fn run(
                                 a.alpha = cur_settings.1;
                                 a.skip_frames = cur_settings.2;
                                 a.power_drop_limit = cur_settings.3;
+                                a.boost_stable_sample = cur_settings.4;
+                                a.boost_stable_frames = cur_settings.5;
+                                a.boost_stable_tol = cur_settings.6;
                                 drop(a);
                                 drop(curves);
                                 *udp_adv.gears_seen.lock().unwrap() = Vec::new();
@@ -331,7 +341,8 @@ async fn run(
                             a.idle_rpm = idle.max(500.0);
                             a.rpm_max = rpm_max.max(1000.0);
                             let boost = pkt.get("boost_psi").copied().unwrap_or(0.0);
-                    a.feed(rpm, torque, power, throttle, gear, boost);
+                    let speed = pkt.get("speed").copied().unwrap_or(0.0);
+                    a.feed(rpm, torque, power, throttle, gear, boost, speed);
                         }
                         // Gear debounce + EV
                         let raw_gear = gear;
@@ -419,6 +430,12 @@ async fn run(
                                                         if let Some(v) = payload.get("boost_stable_sample").and_then(|v| v.as_bool()) {
                                                             if let Ok(mut a) = adv2.advisor.lock() { a.boost_stable_sample = v; }
                                                         }
+                                                        if let Some(v) = payload.get("boost_stable_frames").and_then(|v| v.as_u64()) {
+                                                            if let Ok(mut a) = adv2.advisor.lock() { a.boost_stable_frames = v as u32; }
+                                                        }
+                                                        if let Some(v) = payload.get("boost_stable_tol").and_then(|v| v.as_f64()) {
+                                                            if let Ok(mut a) = adv2.advisor.lock() { a.boost_stable_tol = v; }
+                                                        }
                                                         if let Some(v) = payload.get("curve_alpha").and_then(|v| v.as_f64()) {
                                                             if let Ok(mut a) = adv2.advisor.lock() { a.alpha = v; }
                                                         }
@@ -450,15 +467,15 @@ async fn run(
                                                 *save2.lock().unwrap() = serde_json::json!({});
                                                 let _ = std::fs::write(resolve_path("car_curves.json"), "{}");
                                             }
-                                            // JSON payloads with action params → background thread
-                                            else if text.starts_with("{") {
-                                                let _ = tx_cmd.send(text);
+                                            else if text.contains("unlock_curve") {
+                                                if let Ok(mut a) = adv2.advisor.lock() { a.locked = false; }
                                             }
                                             else if text.contains("lock_curve") {
                                                 if let Ok(mut a) = adv2.advisor.lock() { a.locked = true; }
                                             }
-                                            else if text.contains("unlock_curve") {
-                                                if let Ok(mut a) = adv2.advisor.lock() { a.locked = false; }
+                                            // JSON payloads with action params → background thread
+                                            else if text.starts_with("{") {
+                                                let _ = tx_cmd.send(text);
                                             }
                                             else if text.contains("restart_app") { let _ = tx_cmd.send("restart_app".into()); }
                                             else if text.contains("reset_hud") { let _ = tx_cmd.send("reset_hud".into()); }
@@ -612,7 +629,8 @@ async fn run(
                     a.idle_rpm = idle.max(500.0);
                     a.rpm_max = rmax.max(1000.0);
                     let boost = pkt.get("boost_psi").copied().unwrap_or(0.0);
-                    a.feed(rpm, torque, power, throttle, gear, boost);
+                    let speed = pkt.get("speed").copied().unwrap_or(0.0);
+                    a.feed(rpm, torque, power, throttle, gear, boost, speed);
                 }
             }
             pb_i += 1;
@@ -652,15 +670,13 @@ async fn run(
             save_tick += 1;
             if save_tick % 60 == 0 {
                 if let Ok(a) = adv.advisor.lock() {
-                    if a.ready {
-                        let car_id = *adv.last_car_id.lock().unwrap();
-                        if car_id > 0 {
-                            let mut curves = adv.car_curves.lock().unwrap();
-                            curves.insert(car_id, a.to_dict());
-                            let mut m = serde_json::Map::new();
-                            for (k, v) in curves.iter() { m.insert(k.to_string(), v.clone()); }
-                            *br_save.lock().unwrap() = serde_json::Value::Object(m);
-                        }
+                    let car_id = *adv.last_car_id.lock().unwrap();
+                    if car_id > 0 {
+                        let mut curves = adv.car_curves.lock().unwrap();
+                        curves.insert(car_id, a.to_dict());
+                        let mut m = serde_json::Map::new();
+                        for (k, v) in curves.iter() { m.insert(k.to_string(), v.clone()); }
+                        *br_save.lock().unwrap() = serde_json::Value::Object(m);
                     }
                 }
             }

@@ -7,6 +7,21 @@ const emit = defineEmits<{ action: [action: string] }>()
 
 const s = (key: string, fb: any = null) => props.telemetry?.settings?.[key] ?? fb
 
+const isLocked = computed(() => !!props.telemetry?.curve?.locked)
+const statusText = computed(() => {
+  if (isLocked.value) return "已锁定"
+  if (props.telemetry?.shift_advice?.ready) return "就绪"
+  return "采样中"
+})
+const statusColor = computed(() => {
+  if (isLocked.value) return "var(--orange)"
+  if (props.telemetry?.shift_advice?.ready) return "#3399ff"
+  return "#3399ff"
+})
+function toggleLock() {
+  emit('action', isLocked.value ? 'unlock_curve' : 'lock_curve')
+}
+
 const throttle = computed(() => (props.telemetry?.throttle ?? 0) * 100)
 const brake = computed(() => (props.telemetry?.brake ?? 0) * 100)
 const gLon = computed(() => props.telemetry?.accel_lon ?? 0)
@@ -179,15 +194,22 @@ onMounted(() => nextTick(drawPower))
 
     <!-- Row 2: Power + Car info -->
     <div class="mid-row">
-      <div class="pw-card card"><div class="card-label">功率 / 扭矩</div><canvas ref="pwCanvas" class="pw-canvas"></canvas></div>
+      <div class="pw-card card" :class="{ 'card-locked': isLocked }" @dblclick="toggleLock" title="双击切换锁定"><div class="card-label">功率 / 扭矩</div><canvas ref="pwCanvas" class="pw-canvas"></canvas></div>
       <div class="info-card card">
         <div class="card-label">车况</div>
-        <div class="ir"><span>速度</span><span class="in">{{ speed }}</span><span>km/h</span></div>
-        <div class="ir"><span>增压</span><span class="in">{{ boost.toFixed(1) }}</span><span>psi</span></div>
-        <div class="ir"><span>驱动</span><span>{{ ({0:"FWD",1:"RWD",2:"AWD"}as any)[props.telemetry?.drivetrain]??"-" }}</span></div>
-        <div class="ir"><span>缸数</span><span>{{ props.telemetry?.cylinders ? props.telemetry.cylinders + '缸' : '-' }}</span></div>
-        <div class="ir"><span>PI</span><span>{{ props.telemetry?.car_perf_index??"-" }}</span></div>
-        <div class="ir"><span>ID</span><span>{{ props.telemetry?.car_id??"-" }}</span></div>
+        <div class="info-top">
+          <div class="ir"><span>速度</span><span class="in">{{ speed }}</span><span>km/h</span></div>
+          <div class="ir"><span>增压</span><span class="in">{{ boost.toFixed(1) }}</span><span>psi</span></div>
+          <div class="ir"><span>驱动</span><span>{{ ({0:"FWD",1:"RWD",2:"AWD"}as any)[props.telemetry?.drivetrain]??"-" }}</span></div>
+          <div class="ir"><span>缸数</span><span>{{ props.telemetry?.cylinders ? props.telemetry.cylinders + '缸' : '-' }}</span></div>
+          <div class="ir"><span>PI</span><span>{{ props.telemetry?.car_perf_index??"-" }}</span></div>
+          <div class="ir"><span>ID</span><span>{{ props.telemetry?.car_id??"-" }}</span></div>
+        </div>
+        <div class="info-bot">
+          <div class="ir status-row"><span>曲线</span><span :style="{ color: statusColor, fontWeight: 600 }">{{ statusText }}</span></div>
+          <div class="stab-row"><span class="stab-lbl">增压稳定值</span><span class="stab-val">{{ telemetry?.curve?.stable_value_set ? (telemetry.curve.stable_value as number).toFixed(1) + ' psi' : '-' }}</span></div>
+          <div class="lock-row"><button class="btn-lock-dash" :class="{ on: isLocked }" @click="toggleLock">{{ isLocked ? '已锁定' : '未锁定' }}</button></div>
+        </div>
       </div>
     </div>
 
@@ -284,7 +306,9 @@ onMounted(() => nextTick(drawPower))
 .card-label { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; flex-shrink: 0; }
 .pw-card { flex: 1; min-width: 200px; max-width:1010px; }
 .pw-canvas { flex: 1; width: 100%; min-height: 0; }
-.info-card { width: 110px; flex-shrink: 0; }
+.info-card { width: 110px; flex-shrink: 0; align-items: center; text-align: center; }
+.info-top { align-self: stretch; text-align: left; }
+.info-bot { display: flex; flex-direction: column; align-items: center; }
 .ir { display: flex; gap: 4px; color: var(--dim); font-size: 14px; margin-bottom: 3px; }
 .ir span:first-child { width: 28px; flex-shrink: 0; }
 .in { color: var(--text); font-weight: 600; }
@@ -315,4 +339,18 @@ onMounted(() => nextTick(drawPower))
 .susp-val { font-size: 9px; color: var(--dim); }
 .susp-bar-wrap { width: 32px; height: 140px; background: rgba(255,255,255,0.05); border-radius: 16px; overflow: hidden; display: flex; align-items: flex-end; }
 .susp-bar { width: 100%; border-radius: 0; transition: height 0.2s; min-height: 0; }
+
+.card-locked { border-color: var(--accent); }
+.status-row { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
+.stab-row { display: flex; flex-direction: column; align-items: center; margin-bottom: 6px; }
+.stab-lbl { font-size: 14px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.stab-val { font-size: 14px; color: var(--text); font-weight: 600; }
+.lock-row { margin-top: auto; padding-top: 4px; }
+.btn-lock-dash {
+  padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--card); color: var(--dim); font-size: 12px; cursor: pointer; width: 100%;
+}
+.btn-lock-dash:hover { background: #333; color: var(--text); }
+.btn-lock-dash.on { border-color: var(--orange); color: var(--orange); }
+.btn-lock-dash.on:hover { background: rgba(210,153,29,0.12); }
 </style>

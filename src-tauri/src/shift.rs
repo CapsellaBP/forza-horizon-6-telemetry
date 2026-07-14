@@ -19,7 +19,12 @@ pub struct ShiftAdvisor {
     pub(crate) skip_frames: u32,
     pub(crate) power_drop_limit: f64,
     pub(crate) boost_stable_sample: bool,
-    boost_ema: f64,
+    pub(crate) boost_stable_frames: u32,
+    pub(crate) boost_stable_tol: f64,
+    last_boost: f64,
+    pub(crate) stable_value: f64,
+    stable_value_set: bool,
+    steady_count: u32,
     boost_stable: bool,
 
     // Per-frame state
@@ -50,7 +55,8 @@ impl Default for ShiftAdvisor {
             bins: HashMap::new(), sample_count: 0, ready: false, peak_power_rpm: 0.0, locked: false,
             aggressiveness_pct: 0, limiter_threshold: 1.0, shift_trigger: 1.0,
             alpha: 0.25, throttle_min: 0.95, skip_frames: 8, power_drop_limit: 0.0,
-            boost_stable_sample: false, boost_ema: 0.0, boost_stable: false,
+            boost_stable_sample: false, boost_stable_frames: 30, boost_stable_tol: 0.90,
+            last_boost: 0.0, stable_value: 0.0, stable_value_set: false, steady_count: 0, boost_stable: false,
             frames_since_shift: 999, last_gear_sample: None, last_rpm_sample: 0.0,
             idle_rpm: 1500.0, rpm_max: 8000.0, last_urgency: "hold".into(),
             hysteresis_timer: 0, last_gear_adv: None,
@@ -70,6 +76,8 @@ impl ShiftAdvisor {
         self.bins.clear(); self.sample_count = 0; self.peak_power_rpm = 0.0; self.ready = false;
         self.fuel_cut_rpm = 0.0; self.fuel_cut_lo = 0.0; self.fc_peaks.clear(); self.fc_valleys.clear();
         self.fc_peak = 0.0;
+        self.stable_value = 0.0; self.stable_value_set = false;
+        self.last_boost = 0.0; self.steady_count = 0; self.boost_stable = false;
     }
 
     pub fn to_dict(&self) -> serde_json::Value {
@@ -82,7 +90,8 @@ impl ShiftAdvisor {
             "peak_power_rpm": self.peak_power_rpm,
             "fuel_cut_rpm": self.fuel_cut_rpm, "fuel_cut_lo": self.fuel_cut_lo,
             "idle_rpm": self.idle_rpm, "rpm_max": self.rpm_max, "ready": self.ready,
-            "locked": self.locked,
+            "locked": self.locked, "stable_value": self.stable_value,
+            "stable_value_set": self.stable_value_set,
         })
     }
 
@@ -109,6 +118,8 @@ impl ShiftAdvisor {
         obj.idle_rpm = d.get("idle_rpm").and_then(|v| v.as_f64()).unwrap_or(1500.0);
         obj.rpm_max = d.get("rpm_max").and_then(|v| v.as_f64()).unwrap_or(8000.0);
         obj.ready = d.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+        if let Some(v) = d.get("stable_value").and_then(|v| v.as_f64()) { obj.stable_value = v; }
+        obj.stable_value_set = d.get("stable_value_set").and_then(|v| v.as_bool()).unwrap_or(false);
         obj
     }
 
@@ -126,7 +137,7 @@ impl ShiftAdvisor {
             }
         }
 
-        let fc_limit = if self.fuel_cut_lo > 0.0 { self.fuel_cut_lo } else if self.fuel_cut_rpm > 0.0 { self.fuel_cut_rpm } else { 99999.0 };
+        let fc_limit = if self.fuel_cut_rpm > 0.0 { self.fuel_cut_rpm } else if self.fuel_cut_lo > 0.0 { self.fuel_cut_lo } else { self.rpm_max };
         let mut band_lo = 0.0;
         let mut band_hi = 0.0;
         if self.ready && !power_pts.is_empty() {
@@ -152,6 +163,8 @@ impl ShiftAdvisor {
             "fuel_cut_rpm": self.fuel_cut_rpm,
             "power_band_lo": band_lo, "power_band_hi": band_hi,
             "ready": self.ready, "samples": self.sample_count,
+            "locked": self.locked, "boost_stable": self.boost_stable,
+            "stable_value": self.stable_value, "stable_value_set": self.stable_value_set,
         })
     }
 
@@ -162,19 +175,29 @@ impl ShiftAdvisor {
         (self.idle_rpm + 500.0).max((self.rpm_max - 200.0).min(self.peak_power_rpm + offset))
     }
 
-    pub fn feed(&mut self, rpm: f64, torque: f64, power: f64, throttle: f64, gear: i32, boost: f64) {
+    pub fn feed(&mut self, rpm: f64, torque: f64, power: f64, throttle: f64, gear: i32, boost: f64, speed: f64) {
         if self.locked { return; }
 
         self.idle_rpm = self.idle_rpm.max(500.0);
         self.rpm_max = self.rpm_max.max(1000.0);
 
-        // Boost stability check (for turbo cars)
+        // Boost stability: detect sustained level via exact frame-to-frame match
         if self.boost_stable_sample {
-            let alpha = 0.1;
-            self.boost_ema = self.boost_ema * (1.0 - alpha) + boost * alpha;
-            self.boost_stable = boost > 0.1 && (boost - self.boost_ema).abs() < 0.5;
+            let same = (boost * 10.0).round() == (self.last_boost * 10.0).round();
+            if same {
+                self.steady_count += 1;
+                if self.steady_count >= self.boost_stable_frames && boost >= 0.0 && speed > 0.0 {
+                    self.stable_value = (boost * 10.0).round() / 10.0;
+                    self.stable_value_set = true;
+                }
+            } else {
+                self.steady_count = 0;
+            }
+            // Pass if boost matches established baseline
+            self.boost_stable = boost >= self.stable_value * self.boost_stable_tol;
+            self.last_boost = boost;
         } else {
-            self.boost_stable = true; // not enabled = always sample
+            self.boost_stable = true;
         }
 
         // Fuel cut detection
@@ -195,7 +218,6 @@ impl ShiftAdvisor {
                 self.fc_rising = false;
             }
         }
-        if throttle > 0.9 && rpm > self.fuel_cut_rpm { self.fuel_cut_rpm = rpm; }
         self.last_rpm_tick = rpm;
         self.last_throttle = throttle;
         self.last_gear_fc = Some(gear);
@@ -236,7 +258,7 @@ impl ShiftAdvisor {
 
     fn recalc(&mut self) {
         if self.bins.len() < 5 { return; }
-        let fc_limit = if self.fuel_cut_lo > 0.0 { self.fuel_cut_lo } else if self.fuel_cut_rpm > 0.0 { self.fuel_cut_rpm } else { 99999.0 };
+        let fc_limit = if self.fuel_cut_rpm > 0.0 { self.fuel_cut_rpm } else if self.fuel_cut_lo > 0.0 { self.fuel_cut_lo } else { self.rpm_max };
         let mut best_rpm = 0;
         let mut best_pw = 0.0f64;
         for (b, (cnt, _, pw)) in &self.bins {

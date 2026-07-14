@@ -64,15 +64,6 @@ watch(() => s('udp_port', 5300), (v) => { portVal.value = v })
       </div>
     </div>
 
-    <!-- Boost stable sampling -->
-    <div class="card">
-      <h3>增压稳定采样 <InfoTip>仅涡轮车有效。增压稳定后才采样，过滤增压爬升阶段的低质量数据</InfoTip></h3>
-      <div class="row">
-        <label><input type="checkbox" :checked="!!s('boost_stable_sample', false)"
-          @change="emit('set', 'boost_stable_sample', ($event.target as HTMLInputElement).checked)"> 启用</label>
-      </div>
-    </div>
-
     <!-- EV -->
     <div class="card">
       <h3>EV 检测</h3>

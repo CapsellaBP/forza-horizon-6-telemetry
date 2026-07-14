@@ -77,7 +77,9 @@
 | `sample_skip_frames` | 8 | 0-30 | 换挡后跳过帧数 |
 | `curve_alpha` | 0.25 | 1/16~1/2 | EMA 权重。1/16=慢 1/2=快 |
 | `power_drop_limit` | 0.0 | 0-1.0 | 同比拒绝阈值。当前功率 < 同转速EMA×此值则拒绝。0=不拒绝 |
-| `boost_stable_sample` | false | - | 仅涡轮车。增压稳定后才采样 |
+| `boost_stable_sample` | false | - | 仅涡轮车。增压稳定后才采样，自吸车无需开启 |
+| `boost_stable_frames` | 30 | 5-120 | 增压需连续相同多少帧才确认为稳定基准 |
+| `boost_stable_tol` | 0.90 | 0.50-1.00 | 当前增压 >= 基准值 × 此比例即放行采样 |
 
 ### 悬挂颜色
 

@@ -1,11 +1,30 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, nextTick } from "vue"
+import { ref, onMounted, watch, nextTick, computed } from "vue"
 import InfoTip from "../components/InfoTip.vue"
 
 const props = defineProps<{ telemetry: any }>()
 const emit = defineEmits<{ set: [key: string, value: any], action: [action: string] }>()
 
 function s(key: string, fb: any = null) { return props.telemetry?.settings?.[key] ?? fb }
+
+const isLocked = computed(() => !!props.telemetry?.curve?.locked)
+const boostStable = computed(() => !!props.telemetry?.curve?.boost_stable)
+const boostStableOn = computed(() => !!s('boost_stable_sample'))
+
+const statusText = computed(() => {
+  if (isLocked.value) return "已锁定"
+  if (props.telemetry?.shift_advice?.ready) return "就绪"
+  return "采样中"
+})
+const statusColor = computed(() => {
+  if (isLocked.value) return "var(--orange)"
+  if (props.telemetry?.shift_advice?.ready) return "var(--green)"
+  return "#3399ff"
+})
+
+function toggleLock() {
+  emit('action', isLocked.value ? 'unlock_curve' : 'lock_curve')
+}
 
 const pwCanvas = ref<HTMLCanvasElement | null>(null)
 function drawPower() {
@@ -47,7 +66,7 @@ function drawPower() {
   ctx.fillStyle = "#8b8f93"; ctx.font = "9px sans-serif"; ctx.textAlign = "center"
   for (let r = Math.ceil(rLo / 1000) * 1000; r <= rHi; r += 1000) ctx.fillText((r / 1000).toFixed(0) + "k", x(r), pad.t + ph + 16)
 
-  // Torque Y axis (Nm) with numeric labels
+  // Torque Y axis (Nm)
   ctx.textAlign = "right"
   for (let i = 0; i <= 4; i++) {
     const v = tM * i / 4
@@ -87,8 +106,8 @@ onMounted(() => nextTick(drawPower))
     <h2>动力系统</h2>
     <p class="subtitle">功率曲线 · 扭矩 · 增压 · 换挡参数</p>
 
-    <div class="card">
-      <h3>功率 / 扭矩曲线</h3>
+    <div class="card" :class="{ 'card-locked': isLocked }" @dblclick="toggleLock" title="双击切换锁定">
+      <h3>功率 / 扭矩曲线 <span v-if="isLocked" class="lock-badge">已锁定</span></h3>
       <canvas ref="pwCanvas" style="width:100%;height:280px"></canvas>
     </div>
 
@@ -116,8 +135,9 @@ onMounted(() => nextTick(drawPower))
         <div class="d-item"><span class="lbl">换挡点</span><span class="v">{{ telemetry?.shift_advice?.shift_rpm?.toFixed(0) ?? "-" }} RPM</span></div>
         <div class="d-item"><span class="lbl">断油点</span><span class="v" :style="{ color: telemetry?.shift_advice?.fuel_cut_rpm ? 'var(--red)' : '' }">{{ telemetry?.shift_advice?.fuel_cut_rpm?.toFixed(0) || telemetry?.shift_advice?.limiter_rpm?.toFixed(0) || "-" }} RPM</span></div>
         <div class="d-item"><span class="lbl">采样数</span><span class="v">{{ telemetry?.shift_advice?.samples ?? 0 }}</span></div>
-        <div class="d-item"><span class="lbl">增压</span><span class="v">{{ telemetry?.boost_psi?.toFixed(1) ?? "-" }} psi</span></div>
-        <div class="d-item"><span class="lbl">状态</span><span class="v">{{ telemetry?.curve_locked ? "已锁定" : telemetry?.shift_advice?.ready ? "就绪" : "采样中" }}</span></div>
+        <div class="d-item"><span class="lbl">增压</span><span class="v">{{ telemetry?.boost_psi?.toFixed(1) ?? "-" }} psi<span v-if="boostStableOn" class="boost-tag" :class="{ stable: boostStable }">{{ boostStable ? '稳' : '等' }}</span></span></div>
+        <div class="d-item"><span class="lbl">稳定值</span><span class="v">{{ telemetry?.curve?.stable_value_set ? (telemetry.curve.stable_value as number).toFixed(1) + ' psi' : '-' }}</span></div>
+        <div class="d-item"><span class="lbl">状态</span><span class="v" :style="{ color: statusColor }">{{ statusText }}</span></div>
         </div>
       </div>
     </div>
@@ -126,8 +146,7 @@ onMounted(() => nextTick(drawPower))
       <div class="card">
         <h3>曲线管理</h3>
         <div class="action-row">
-          <button class="btn" @click="emit('action', 'lock_curve')">锁定</button>
-          <button class="btn" @click="emit('action', 'unlock_curve')">解锁</button>
+          <button class="btn" :class="{ 'btn-active': isLocked }" @click="toggleLock">{{ isLocked ? '已锁定' : '未锁定' }}</button>
           <button class="btn" @click="emit('action', 'reset_curve')">重置此车</button>
           <button class="btn" @click="emit('action', 'reset_all')">全部重置</button>
         </div>
@@ -142,6 +161,32 @@ onMounted(() => nextTick(drawPower))
         </div>
       </div>
     </div>
+
+    <div class="card">
+      <h3>增压稳定采样 <span class="tag">仅涡轮有效</span></h3>
+      <p class="card-note">逐帧比对增压值，持续稳定后确立基准，之后压力接近基准即采样。自吸车（含怠速负压）无正面效果，无需开启。</p>
+      <div class="row">
+        <label class="check-label">
+          <input type="checkbox" :checked="!!s('boost_stable_sample', false)"
+            @change="emit('set', 'boost_stable_sample', ($event.target as HTMLInputElement).checked)">
+          启用
+        </label>
+      </div>
+      <div class="two-col-inner">
+        <div class="row">
+          <label>连续帧数 <InfoTip>增压值需连续相同多少帧才确认为稳定基准。更大=更严格，默认 30（约 0.5 秒）</InfoTip></label>
+          <input type="range" min="5" max="120" :value="s('boost_stable_frames', 30)"
+            @input="emit('set', 'boost_stable_frames', Number(($event.target as HTMLInputElement).value))">
+          <span class="val">{{ s('boost_stable_frames', 30) }} 帧</span>
+        </div>
+        <div class="row">
+          <label>峰值容忍 <InfoTip>当前增压 >= 基准值 × 此比例即放行采样。0.90 = 允许 10% 波动。更小 = 更宽容</InfoTip></label>
+          <input type="range" min="50" max="100" :value="(s('boost_stable_tol', 0.90)) * 100"
+            @input="emit('set', 'boost_stable_tol', Number(($event.target as HTMLInputElement).value) / 100)">
+          <span class="val">{{ (s('boost_stable_tol', 0.90) * 100).toFixed(0) }}%</span>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -149,8 +194,11 @@ onMounted(() => nextTick(drawPower))
 .tab-page { padding: 24px; }
 h2 { font-size: 18px; margin-bottom: 2px; }
 .subtitle { font-size: 12px; color: var(--dim); margin-bottom: 20px; }
-.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; transition: border-color 0.2s; }
 .card h3 { font-size: 12px; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+.card-note { font-size: 11px; color: var(--dim); margin-bottom: 10px; line-height: 1.45; }
+.card-locked { border-color: var(--accent); }
+.lock-badge { font-size: 10px; color: var(--orange); font-weight: 400; margin-left: 6px; text-transform: none; }
 .tag { font-size: 10px; color: var(--orange); font-weight: 400; margin-left: 4px; }
 .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .row label { font-size: 12px; color: var(--dim); min-width: 110px; flex-shrink: 0; }
@@ -161,10 +209,22 @@ h2 { font-size: 18px; margin-bottom: 2px; }
 .lbl { color: var(--dim); width: 60px; flex-shrink: 0; }
 .v { color: var(--text); }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.two-col-inner { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .action-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.check-label { min-width: auto !important; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.check-label input[type=checkbox] { accent-color: var(--accent); }
 .btn {
   padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px;
   background: var(--card); color: var(--text); font-size: 12px; cursor: pointer;
 }
 .btn:hover { background: #333; }
+.btn-active {
+  border-color: var(--orange); color: var(--orange);
+}
+.btn-active:hover { background: rgba(210,153,29,0.12); }
+.boost-tag {
+  font-size: 10px; margin-left: 4px; padding: 0 3px; border-radius: 2px;
+  background: rgba(255,255,255,0.08); color: var(--dim);
+}
+.boost-tag.stable { color: var(--green); }
 </style>

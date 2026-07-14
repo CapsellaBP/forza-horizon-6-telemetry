@@ -1,4 +1,5 @@
 // FH6 Telemetry — Tauri backend
+#![recursion_limit = "256"]
 
 mod telemetry;
 mod server;
